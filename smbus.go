@@ -36,31 +36,61 @@ var (
 	errSMBusBlockDataMax = errors.New("smbus: buffer slice too big")
 )
 
+//Options defines I2C options
+type Options struct {
+	//Force if true, forces to open i2c even if address is taken by Linux driver
+	Force bool
+}
+
 // Conn is connection to a i2c device.
 type Conn struct {
-	f *os.File
+	f     *os.File
+	force bool
+}
+
+// OpenFileWithOptions opens a connection with options to the i2c bus number
+// Users should call SetAddr afterwards to have a properly configured SMBus connection.
+func OpenFileWithOptions(bus int, opts *Options) (*Conn, error) {
+	if opts == nil {
+		return nil, fmt.Errorf("opts is nil")
+	}
+
+	f, err := os.OpenFile(fmt.Sprintf("/dev/i2c-%d", bus), os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	return &Conn{f: f, force: opts.Force}, nil
 }
 
 // OpenFile opens a connection to the i2c bus number.
 // Users should call SetAddr afterwards to have a properly configured SMBus connection.
+// Legacy interface. New applications should use OpenFileWithOptions.
 func OpenFile(bus int) (*Conn, error) {
-	f, err := os.OpenFile(fmt.Sprintf("/dev/i2c-%d", bus), os.O_RDWR, 0600)
-	if err != nil {
-		return nil, err
+	return OpenFileWithOptions(bus, &Options{
+		Force: false,
+	})
+}
+
+// OpenWithOptions opens a connection with options to the i2c bus number at address addr.
+func OpenWithOptions(bus int, addr uint8, opts *Options) (c *Conn, err error) {
+	if c, err = OpenFileWithOptions(bus, opts); err != nil {
+		c = nil
+		return
 	}
-	return &Conn{f: f}, nil
+
+	if err = c.addr(addr); err != nil {
+		c.Close()
+		c = nil
+	}
+	return
 }
 
 // Open opens a connection to the i2c bus number at address addr.
+// Legacy interface. New applications should use OpenWithOptions.
 func Open(bus int, addr uint8) (*Conn, error) {
-	f, err := os.OpenFile(fmt.Sprintf("/dev/i2c-%d", bus), os.O_RDWR, 0600)
-	if err != nil {
-		return nil, err
-	}
-	if err := ioctl(f.Fd(), i2cSlave, uintptr(addr)); err != nil {
-		return nil, err
-	}
-	return &Conn{f: f}, nil
+	return OpenWithOptions(bus, addr, &Options{
+		Force: false,
+	})
 }
 
 // Write sends buf to the remote i2c device.
@@ -208,7 +238,11 @@ func (c *Conn) WriteBlockData(addr, reg uint8, buf []byte) error {
 }
 
 func (c *Conn) addr(addr uint8) error {
-	return ioctl(c.f.Fd(), i2cSlave, uintptr(addr))
+	if c.force {
+		return ioctl(c.f.Fd(), i2cSlaveForce, uintptr(addr))
+	} else {
+		return ioctl(c.f.Fd(), i2cSlave, uintptr(addr))
+	}
 }
 
 func (c *Conn) SetAddr(addr uint8) error {

@@ -18,7 +18,7 @@ func TestOpen(t *testing.T) {
 		t.Skip("need root access")
 	}
 
-	c, err := smbus.Open(0, 0x69)
+	c, err := smbus.OpenWithOptions(0, 0x69, &smbus.Options{Force: false})
 	if err != nil {
 		t.Fatalf("open error: %v\n", err)
 	}
