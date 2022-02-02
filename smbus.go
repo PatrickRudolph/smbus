@@ -40,12 +40,17 @@ var (
 type Options struct {
 	//Force if true, forces to open i2c even if address is taken by Linux driver
 	Force bool
+	// List of uint8 registers to backup on opening and restore upon closing.
+	// Only supported when using OpenWithOptions.
+	BackupRestoreRegs []uint8
 }
 
 // Conn is connection to a i2c device.
 type Conn struct {
-	f     *os.File
-	force bool
+	f          *os.File
+	force      bool
+	backupRegs map[uint8]uint8
+	backupaddr uint8
 }
 
 // OpenFileWithOptions opens a connection with options to the i2c bus number
@@ -54,12 +59,18 @@ func OpenFileWithOptions(bus int, opts *Options) (*Conn, error) {
 	if opts == nil {
 		return nil, fmt.Errorf("opts is nil")
 	}
+	if opts.BackupRestoreRegs != nil && len(opts.BackupRestoreRegs) > 0 {
+		return nil, fmt.Errorf("option BackupRestoreRegs is not supported with OpenFile()")
+	}
 
 	f, err := os.OpenFile(fmt.Sprintf("/dev/i2c-%d", bus), os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
-	return &Conn{f: f, force: opts.Force}, nil
+	return &Conn{f: f,
+		force:      opts.Force,
+		backupRegs: map[uint8]uint8{},
+		backupaddr: 0}, nil
 }
 
 // OpenFile opens a connection to the i2c bus number.
@@ -67,13 +78,23 @@ func OpenFileWithOptions(bus int, opts *Options) (*Conn, error) {
 // Legacy interface. New applications should use OpenFileWithOptions.
 func OpenFile(bus int) (*Conn, error) {
 	return OpenFileWithOptions(bus, &Options{
-		Force: false,
+		Force:             false,
+		BackupRestoreRegs: nil,
 	})
 }
 
 // OpenWithOptions opens a connection with options to the i2c bus number at address addr.
 func OpenWithOptions(bus int, addr uint8, opts *Options) (c *Conn, err error) {
-	if c, err = OpenFileWithOptions(bus, opts); err != nil {
+	if opts == nil {
+		return nil, fmt.Errorf("opts is nil")
+	}
+
+	optsOpenFile := &Options{
+		Force:             opts.Force,
+		BackupRestoreRegs: nil,
+	}
+
+	if c, err = OpenFileWithOptions(bus, optsOpenFile); err != nil {
 		c = nil
 		return
 	}
@@ -81,7 +102,22 @@ func OpenWithOptions(bus int, addr uint8, opts *Options) (c *Conn, err error) {
 	if err = c.addr(addr); err != nil {
 		c.Close()
 		c = nil
+		return
 	}
+
+	if opts.BackupRestoreRegs != nil {
+		c.backupaddr = addr
+		for _, i := range opts.BackupRestoreRegs {
+			var reg uint8
+			if reg, err = c.ReadReg(addr, i); err != nil {
+				c.Close()
+				c = nil
+				return
+			}
+			c.backupRegs[i] = reg
+		}
+	}
+
 	return
 }
 
@@ -89,7 +125,8 @@ func OpenWithOptions(bus int, addr uint8, opts *Options) (c *Conn, err error) {
 // Legacy interface. New applications should use OpenWithOptions.
 func Open(bus int, addr uint8) (*Conn, error) {
 	return OpenWithOptions(bus, addr, &Options{
-		Force: false,
+		Force:             false,
+		BackupRestoreRegs: []uint8{},
 	})
 }
 
@@ -114,6 +151,14 @@ func (c *Conn) Read(p []byte) (int, error) {
 
 // Close closes the connection to the remote i2c device.
 func (c *Conn) Close() error {
+	// Restore backed up registers
+	for k, v := range c.backupRegs {
+		err := c.WriteReg(c.backupaddr, k, v)
+		if err != nil {
+			return c.f.Close()
+		}
+	}
+
 	return c.f.Close()
 }
 
